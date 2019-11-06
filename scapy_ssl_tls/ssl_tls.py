@@ -8,7 +8,7 @@ from scapy.layers.inet import TCP, UDP
 from scapy.layers import x509
 
 
-import ssl_tls_registry as registry
+import scapy_ssl_tls.ssl_tls_registry as registry
 
 
 class BLenField(LenField):
@@ -258,7 +258,7 @@ TLS_VERSIONS = {
     0x7f10: "TLS_1_3_DRAFT_16",
     0x7f12: "TLS_1_3_DRAFT_18",
     0xfeff: "DTLS_1_0",
-    0xfefd: "DTLS_1_1",
+    0xfefd: "DTLS_1_2",
 }
 TLSVersion = EnumStruct(TLS_VERSIONS)
 
@@ -1611,6 +1611,7 @@ bind_layers(TLSExtension, TLSExtPreSharedKey, {'type': TLSExtensionType.PRE_SHAR
 # DTLSRecord
 bind_layers(DTLSRecord, DTLSHandshake, {'content_type': TLSContentType.HANDSHAKE})
 bind_layers(DTLSHandshake, DTLSClientHello, {'type': TLSHandshakeType.CLIENT_HELLO})
+bind_layers(DTLSHandshake, DTLSHelloVerify, {'type': TLSHandshakeType.HELLO_VERIFY_REQUEST})
 
 # SSLv2
 bind_layers(SSLv2Record, SSLv2ServerHello, {'content_type': SSLv2MessageType.SERVER_HELLO})
