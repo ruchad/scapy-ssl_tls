@@ -326,9 +326,10 @@ TLS Session Context:
                                                                      tls.TLS_CIPHER_SUITES.get(self.negotiated.ciphersuite, "UNKNOWN")))
         self.negotiated.encryption = (self.cipher_properties["cipher"]["name"], self.cipher_properties["cipher"]["key_len"],
                                       self.cipher_properties["cipher"]["mode_name"])
-        self.requires_iv = True if tls.TLSVersion.TLS_1_0 < self.negotiated.version < tls.TLSVersion.TLS_1_3 else False
+        self.requires_iv = True if ((tls.TLSVersion.TLS_1_0 < self.negotiated.version < tls.TLSVersion.TLS_1_3) or
+                                    self.negotiated.version == tls.TLSVersion.DTLS_1_0) else False
 
-        if self.negotiated.version < tls.TLSVersion.TLS_1_3:
+        if self.negotiated.version < tls.TLSVersion.TLS_1_3 or self.negotiated.version == tls.TLSVersion.DTLS_1_0:
             self.__handle_tls12_server_hello(server_hello)
         # TlS 1.3 case. Extract KEX data from KeyShare extension
         else:
@@ -467,7 +468,7 @@ TLS Session Context:
         self.__ccs_count += 1
 
     def __handle_finished(self, finished):
-        if self.negotiated.version >= tls.TLSVersion.TLS_1_3:
+        if self.negotiated.version >= tls.TLSVersion.TLS_1_3 and self.negotiated.version != tls.TLSVersion.DTLS_1_0:
             ctx = self.client_ctx
             verify_data = self.derive_client_finished()
             # This is the first finished in the connection, coming from the server. Transition to traffic secrets
@@ -513,12 +514,16 @@ TLS Session Context:
         """
         fill context
         """
-        if pkt.haslayer(tls.TLSHandshake):
+        if pkt.haslayer(tls.TLSHandshake) or pkt.haslayer(tls.DTLSHandshake):
             # requires handshake messages
             if pkt.haslayer(tls.TLSClientHello):
                 self.__handle_client_hello(pkt[tls.TLSClientHello])
+            if pkt.haslayer(tls.DTLSClientHello):
+                self.__handle_client_hello(pkt[tls.DTLSClientHello])
             if pkt.haslayer(tls.TLSServerHello):
                 self.__handle_server_hello(pkt[tls.TLSServerHello])
+            if pkt.haslayer(tls.DTLSServerHello):
+                self.__handle_server_hello(pkt[tls.DTLSServerHello])
             if pkt.haslayer(tls.TLSCertificateList):
                 self.__handle_cert_list(pkt[tls.TLSCertificateList])
             if pkt.haslayer(tls.TLSServerKeyExchange):
@@ -600,6 +605,10 @@ TLS Session Context:
                 for handshake in pkt[tls.TLSHandshakes].handshakes:
                     if not handshake.haslayer(tls.TLSHelloRequest):
                         yield handshake
+            if pkt.haslayer(tls.DTLSHandshake):
+                for handshake in pkt[tls.DTLSHandshake]:
+                    if not handshake.haslayer(tls.TLSHelloRequest):
+                        yield handshake
 
     def _derive_finished(self, secret, hash_):
         return HMAC.new(secret, hash_, digestmod=self.prf.digest).digest()
@@ -615,7 +624,7 @@ TLS Session Context:
         return self._derive_finished(self.client_ctx.finished_secret, self.get_handshake_hash(self.prf.digest, tls.TLSFinished, True))
 
     def get_verify_data(self, data=None):
-        if self.negotiated.version >= tls.TLSVersion.TLS_1_3:
+        if self.negotiated.version >= tls.TLSVersion.TLS_1_3 and self.negotiated.version != tls.TLSVersion.DTLS_1_0:
             if self.client:
                 prf_verify_data = self.derive_client_finished()
             else:
@@ -728,7 +737,7 @@ class TLSPRF(object):
                 self.digest = digest
 
     def get_bytes(self, key, label, random, num_bytes):
-        if self.tls_version >= tls.TLSVersion.TLS_1_2:
+        if self.tls_version >= tls.TLSVersion.TLS_1_2 and self.tls_version != tls.TLSVersion.DTLS_1_0:
             bytes_ = self._get_bytes(self.digest, key, label, random, num_bytes)
         else:
             key_len = (len(key) + 1) // 2
@@ -1220,7 +1229,11 @@ class CBCCryptoContainer(CryptoContainer):
         return CBCCryptoContainer.from_context(tls_ctx, ctx, crypto_data)
 
     def __mac(self):
-        sequence_ = struct.pack("!Q", self.crypto_data.sequence)
+        if self.crypto_data.version == tls.TLSVersion.DTLS_1_0:
+            epoch_ = 1
+            sequence_ = struct.pack("!H6B", epoch_,0, 0, 0, 0, 0, 0)
+        else:
+            sequence_ = struct.pack("!Q", self.crypto_data.sequence)
         content_type_ = struct.pack("!B", self.crypto_data.content_type)
         version_ = struct.pack("!H", self.crypto_data.version)
         len_ = struct.pack("!H", self.crypto_data.data_len)

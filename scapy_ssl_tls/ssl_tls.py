@@ -2,6 +2,7 @@
 # -*- coding: UTF-8 -*-
 # Author : <github.com/tintinweb/scapy-ssl_tls>
 
+import os
 from scapy.packet import bind_layers, Packet, Raw
 from scapy.fields import *
 from scapy.layers.inet import TCP, UDP
@@ -774,8 +775,8 @@ class TLSKeyExchange(Packet):
     def guess_payload_class(self, payload):
         pkt = self.underlayer
         # If our underlayer is a handshake, use the tls_ctx to determine
-        # wheat KEX we are currently using
-        if pkt is not None and pkt.haslayer(TLSHandshake) and hasattr(pkt, "tls_ctx"):
+        # what KEX we are currently using
+        if pkt is not None and (pkt.haslayer(TLSHandshake) or pkt.haslayer(DTLSHandshake)) and hasattr(pkt, "tls_ctx"):
             if pkt.tls_ctx is not None:
                 kex = pkt.tls_ctx.negotiated.key_exchange
                 return self.kex_payload_table.get(kex, Raw)
@@ -1151,6 +1152,18 @@ class DTLSHelloVerify(PacketNoPayload):
                    XFieldLenField("cookie_length", None, length_of="cookie", fmt="B"),
                    StrLenField("cookie", '', length_from=lambda x:x.cookie_length)]
 
+class DTLSServerHello(PacketNoPayload):
+    name = "DTLS Server Hello"
+    fields_desc = [XShortEnumField("version", TLSVersion.DTLS_1_0, TLS_VERSIONS),
+                   IntField("gmt_unix_time", int(time.time())),
+                   StrFixedLenField("random_bytes", os.urandom(28), 28),
+                   XFieldLenField("session_id_length", None, length_of="session_id", fmt="B"),
+                   StrLenField("session_id", os.urandom(20), length_from=lambda x:x.session_id_length),
+                   XShortEnumField("cipher_suite", TLSCipherSuite.RSA_WITH_AES_128_CBC_SHA, TLS_CIPHER_SUITES),
+                   ByteEnumField("compression_method", TLSCompressionMethod.NULL, TLS_COMPRESSION_METHODS),
+                   StrConditionalField(XFieldLenField("extensions_length", None, length_of="extensions", fmt="H"),
+                                       lambda pkt, s, val: True if val or pkt.extensions or (s and struct.unpack("!H", s[:2])[0] == len(s) - 2) else False),
+                   TypedPacketListField("extensions", None, TLSExtension, length_from=lambda x:x.extensions_length, type_="DTLSServerHello")]
 
 SSLv2_MESSAGE_TYPES = {
     0x01: 'client_hello',
@@ -1335,7 +1348,7 @@ class SSL(Packet):
 
     def pre_dissect(self, raw_bytes):
         # figure out if we're UDP or TCP
-        if self.underlayer is not None and self.underlayer.haslayer(UDP):
+        if ord(raw_bytes[1]) == 0xfe and ord(raw_bytes[2]) == 0xff:
             self.guessed_next_layer = DTLSRecord
         elif ord(raw_bytes[0]) & 0x80:
             self.guessed_next_layer = SSLv2Record
@@ -1355,7 +1368,10 @@ class SSL(Packet):
         while pos < len(raw_bytes) - record_header_len:
             payload_len = record(raw_bytes[pos:pos + record_header_len]).length
             if self.tls_ctx is not None:
-                payload = record(raw_bytes[pos:pos + record_header_len + payload_len], ctx=self.tls_ctx)
+                if record == DTLSRecord:
+                    payload = record(raw_bytes[pos:pos + record_header_len + payload_len])
+                else:
+                    payload = record(raw_bytes[pos:pos + record_header_len + payload_len], ctx=self.tls_ctx)
                 # Perform inline decryption if required
                 payload = self.do_decrypt_payload(payload)
                 self.tls_ctx.insert(payload, origin=self._origin)
@@ -1372,7 +1388,8 @@ class SSL(Packet):
     def do_decrypt_payload(self, record):
         content_type = None
         encrypted_payload, layer = self._get_encrypted_payload(record)
-        if encrypted_payload is not None or self.tls_ctx.negotiated.version >= TLSVersion.TLS_1_3:
+        if encrypted_payload is not None or self.tls_ctx.negotiated.version >= TLSVersion.TLS_1_3 \
+                                         and self.tls_ctx.negotiated.version != TLSVersion.DTLS_1_0:
             try:
                 if self.tls_ctx.client:
                     cleartext = self.tls_ctx.server_ctx.crypto_ctx.decrypt(encrypted_payload,
@@ -1430,7 +1447,8 @@ def find_padding_start(payload, padding_byte=b"\x00"):
 cleartext_handler = {TLSPlaintext: lambda pkt, tls_ctx: (TLSContentType.APPLICATION_DATA, pkt[TLSPlaintext].data),
                      TLSChangeCipherSpec: lambda pkt, tls_ctx: (TLSContentType.CHANGE_CIPHER_SPEC, str(pkt[TLSChangeCipherSpec])),
                      TLSAlert: lambda pkt, tls_ctx: (TLSContentType.ALERT, str(pkt[TLSAlert])), #}
-                     TLSHandshakes: lambda pkt, tls_ctx: (TLSContentType.HANDSHAKE, str(pkt[TLSHandshakes]))}
+                     TLSHandshakes: lambda pkt, tls_ctx: (TLSContentType.HANDSHAKE, str(pkt[TLSHandshakes])),
+                     DTLSHandshake: lambda pkt, tls_ctx: (TLSContentType.HANDSHAKE, str(pkt[DTLSHandshake]))}
 
 
 def to_raw(pkt, tls_ctx, include_record=True, compress_hook=None, pre_encrypt_hook=None, encrypt_hook=None):
@@ -1468,8 +1486,10 @@ def to_raw(pkt, tls_ctx, include_record=True, compress_hook=None, pre_encrypt_ho
         ciphertext = ctx.crypto_ctx.encrypt(crypto_container)
 
     if include_record:
-        if tls_ctx.negotiated.version >= TLSVersion.TLS_1_3:
+        if tls_ctx.negotiated.version >= TLSVersion.TLS_1_3 and tls_ctx.negotiated.version!= TLSVersion.DTLS_1_0:
             tls_ciphertext = TLSRecord(content_type=TLSContentType.APPLICATION_DATA) / ciphertext
+        elif tls_ctx.negotiated.version == TLSVersion.DTLS_1_0:
+            tls_ciphertext = DTLSRecord(version=tls_ctx.negotiated.version, content_type=content_type, sequence=0, epoch=1) / ciphertext
         else:
             tls_ciphertext = TLSRecord(version=tls_ctx.negotiated.version, content_type=content_type) / ciphertext
     else:
@@ -1530,6 +1550,35 @@ def tls_do_handshake(tls_socket, version, ciphers, extensions=[]):
         resp2 = tls_do_round_trip(tls_socket, TLSHandshakes(handshakes=[TLSHandshake() /
                                                                         TLSFinished(data=tls_socket.tls_ctx.get_verify_data())]))
         return resp1, resp2
+    elif version == TLSVersion.DTLS_1_0:
+        suites = [TLSCipherSuite.RSA_WITH_AES_128_CBC_SHA, TLSCipherSuite.RSA_WITH_AES_128_GCM_SHA256]
+        suites_length = 2 * len(suites)
+
+        client_hello = DTLSRecord(version=version, sequence=0) / \
+                       DTLSHandshake(fragment_offset=0) / \
+                       DTLSClientHello(cipher_suites=suites,
+                                       cipher_suites_length=suites_length,
+                                       compression_methods_length=1,
+                                       compression_methods=['NULL'],
+                                       extensions=extensions)
+
+        resp1 = tls_do_round_trip(tls_socket, client_hello)
+
+        client_key_exchange = DTLSRecord(version=version, sequence=1) / \
+                              DTLSHandshake(fragment_offset=0, sequence=1) / \
+                              TLSClientKeyExchange() / \
+                              tls_socket.tls_ctx.get_client_kex_data()
+
+        client_ccs = DTLSRecord(version=version, sequence=2) / TLSChangeCipherSpec()
+        tls_do_round_trip(tls_socket, TLS.from_records([client_key_exchange, client_ccs]), False)
+
+        client_finished = DTLSRecord(version=version, sequence=0, epoch=1) / \
+                          DTLSHandshake(fragment_offset=0, sequence=2) / \
+                          TLSFinished(data=tls_socket.tls_ctx.get_verify_data())
+
+        resp2 = tls_do_round_trip(tls_socket, client_finished)
+        return resp1, resp2
+
     else:
         raise NotImplementedError("Do handshake not implemented for TLS 1.3")
 
@@ -1610,8 +1659,20 @@ bind_layers(TLSExtension, TLSExtPreSharedKey, {'type': TLSExtensionType.PRE_SHAR
 
 # DTLSRecord
 bind_layers(DTLSRecord, DTLSHandshake, {'content_type': TLSContentType.HANDSHAKE})
+bind_layers(DTLSRecord, TLSAlert, {'content_type': TLSContentType.ALERT})
+
+# --> handshake proto
 bind_layers(DTLSHandshake, DTLSClientHello, {'type': TLSHandshakeType.CLIENT_HELLO})
 bind_layers(DTLSHandshake, DTLSHelloVerify, {'type': TLSHandshakeType.HELLO_VERIFY_REQUEST})
+bind_layers(DTLSHandshake, DTLSServerHello, {'type': TLSHandshakeType.SERVER_HELLO})
+bind_layers(DTLSHandshake, TLSServerKeyExchange, {'type': TLSHandshakeType.SERVER_KEY_EXCHANGE})
+bind_layers(DTLSHandshake, TLSServerHelloDone, {'type': TLSHandshakeType.SERVER_HELLO_DONE})
+bind_layers(DTLSHandshake, TLSCertificateList, {'type': TLSHandshakeType.CERTIFICATE})
+bind_layers(DTLSHandshake, TLSClientKeyExchange, {'type': TLSHandshakeType.CLIENT_KEY_EXCHANGE})
+bind_layers(DTLSRecord, TLSChangeCipherSpec, {'content_type': TLSContentType.CHANGE_CIPHER_SPEC})
+bind_layers(DTLSHandshake, TLSCertificateVerify, {"type": TLSHandshakeType.CERTIFICATE_VERIFY})
+bind_layers(DTLSHandshake, TLSFinished, {'type': TLSHandshakeType.FINISHED})
+# <---
 
 # SSLv2
 bind_layers(SSLv2Record, SSLv2ServerHello, {'content_type': SSLv2MessageType.SERVER_HELLO})

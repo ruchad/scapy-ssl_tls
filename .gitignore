@@ -22,6 +22,7 @@ var/
 .installed.cfg
 *.egg
 *.eggs/
+venv/
 
 # Installer logs
 pip-log.txt
@@ -45,6 +46,7 @@ cover/
 .pydevproject
 .settings
 .idea/
+.DS_Store
 
 # Rope
 .ropeproject

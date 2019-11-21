@@ -31,7 +31,10 @@ def dtls_ch_valid(ip):
     suites_length = 2 * len(suites)
 
     # Client Hello message
-    d1_ch = DTLSClientHello(cipher_suites=suites, cipher_suites_length=suites_length)
+    d1_ch = DTLSClientHello(cipher_suites=suites,
+                            cipher_suites_length=suites_length,
+                            compression_methods_length=1,
+                            compression_methods=['NULL'])
     d1_ch_len = len(str(d1_ch))
 
     # Populate the Handshake message
@@ -40,7 +43,7 @@ def dtls_ch_valid(ip):
 
     # Construct the DTL ClientHello Request
     record_len = d1_hs_len + d1_ch_len
-    p = DTLSRecord(length=record_len) / d1_hs / d1_ch
+    p = DTLSRecord(length=record_len, sequence=0) / d1_hs / d1_ch
     p.show()
 
     print("Sending DTLS payload")
@@ -48,9 +51,6 @@ def dtls_ch_valid(ip):
     resp = s.recv(1024 * 8)
     print("Received, %s" % repr(resp))
     DTLSRecord(resp).show()
-    #cookie = resp.payload.payload.cookie
-    #cookie_length = resp.payload.payload.cookie_length
-
     s.close()
 
 
@@ -59,4 +59,5 @@ if __name__ == "__main__":
         print("USAGE: <host> <port>")
         exit(1)
     target = (sys.argv[1], int(sys.argv[2]))
+    dtls_ch_valid(target)
 
