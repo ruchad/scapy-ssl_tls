@@ -1553,8 +1553,9 @@ def tls_do_handshake(tls_socket, version, ciphers, extensions=[]):
     elif version == TLSVersion.DTLS_1_0:
         suites = [TLSCipherSuite.RSA_WITH_AES_128_CBC_SHA, TLSCipherSuite.RSA_WITH_AES_128_GCM_SHA256]
         suites_length = 2 * len(suites)
+        seq = 0
 
-        client_hello = DTLSRecord(version=version, sequence=0) / \
+        client_hello = DTLSRecord(version=version, sequence=seq) / \
                        DTLSHandshake(fragment_offset=0) / \
                        DTLSClientHello(cipher_suites=suites,
                                        cipher_suites_length=suites_length,
@@ -1564,8 +1565,25 @@ def tls_do_handshake(tls_socket, version, ciphers, extensions=[]):
 
         resp1 = tls_do_round_trip(tls_socket, client_hello)
 
-        client_key_exchange = DTLSRecord(version=version, sequence=1) / \
-                              DTLSHandshake(fragment_offset=0, sequence=1) / \
+        # Client Hello with Cookie
+        if resp1.haslayer(DTLSHelloVerify):
+            cookie = resp1[DTLSHandshake].payload.cookie
+            cookie_len = resp1[DTLSHandshake].payload.cookie_length
+            seq += 1
+            client_hello = DTLSRecord(version=version, sequence=seq) / DTLSHandshake(fragment_offset=0, sequence=seq) / \
+                           DTLSClientHello(cipher_suites=suites,
+                                           cipher_suites_length=suites_length,
+                                           cookie=cookie,
+                                           cookie_length=cookie_len,
+                                           compression_methods_length=1,
+                                           compression_methods=['NULL'],
+                                           extensions=extensions)
+            resp1 = tls_do_round_trip(tls_socket, client_hello)
+
+        # Key Exchange and Change Cipher Spec
+        seq += 1
+        client_key_exchange = DTLSRecord(version=version, sequence=seq) / \
+                              DTLSHandshake(fragment_offset=0, sequence=seq) / \
                               TLSClientKeyExchange() / \
                               tls_socket.tls_ctx.get_client_kex_data()
 
@@ -1580,7 +1598,7 @@ def tls_do_handshake(tls_socket, version, ciphers, extensions=[]):
         return resp1, resp2
 
     else:
-        raise NotImplementedError("Do handshake not implemented for TLS 1.3")
+        raise NotImplementedError("Do handshake not implemented for TLS 1.3, DTLS 1.2")
 
 
 def tls_fragment_payload(pkt, record=None, size=2**14):
